@@ -1,47 +1,54 @@
 import os
+import torch
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from ultralytics import YOLO
-import torch
 
+# ---------- App ----------
 app = Flask(__name__)
 CORS(app)
 
-# --- Railway config ---
+# ---------- Config ----------
 PORT = int(os.environ.get("PORT", 8080))
-
-# --- Force CPU (Railway has NO GPU) ---
-torch.set_default_device("cpu")
-
-# --- Load model ---
 MODEL_PATH = "yolov8n-cls.pt"
 
-if not os.path.exists(MODEL_PATH):
-    raise FileNotFoundError(f"Model file not found: {MODEL_PATH}")
+# ---------- Load model (CPU only) ----------
+try:
+    device = "cpu"
+    model = YOLO(MODEL_PATH)
+    model.to(device)
+    print("✅ YOLO model loaded successfully on CPU")
+except Exception as e:
+    print("❌ Model load failed:", e)
+    raise e
 
-model = YOLO(MODEL_PATH)
-
+# ---------- Routes ----------
 @app.route("/", methods=["GET"])
 def health():
-    return {"status": "ok", "message": "YOLO Flask backend running"}
+    return jsonify({
+        "status": "ok",
+        "message": "YOLO Flask backend running"
+    })
 
 @app.route("/predict", methods=["POST"])
 def predict():
     if "image" not in request.files:
-        return jsonify({"error": "No image file"}), 400
+        return jsonify({"error": "No image uploaded"}), 400
 
     image = request.files["image"]
-    result = model(image, verbose=False)[0]
+    results = model(image, verbose=False)[0]
 
-    top1 = result.probs.top1
-    confidence = float(result.probs.top1conf)
-    label = model.names[top1]
+    probs = results.probs
+    class_id = int(probs.top1)
+    confidence = float(probs.top1conf)
+    label = model.names[class_id]
 
     return jsonify({
         "label": label,
-        "confidence": confidence
+        "confidence": round(confidence, 4)
     })
 
+# ---------- Start server ----------
 if __name__ == "__main__":
-    print(f"Starting server on port {PORT}")
+    print(f"🚀 Starting server on port {PORT}")
     app.run(host="0.0.0.0", port=PORT)
