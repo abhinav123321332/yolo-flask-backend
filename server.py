@@ -11,7 +11,7 @@ app = Flask(__name__)
 CORS(app)
 
 # ----------------------------
-# Config
+# Configuration
 # ----------------------------
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -19,10 +19,10 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 MODEL_PATH = "yolov8n-cls.pt"
 
 # ----------------------------
-# Load model once
+# Load YOLO model once
 # ----------------------------
 model = YOLO(MODEL_PATH)
-print("✅ YOLO model loaded")
+print("✅ YOLO model loaded successfully")
 
 # ----------------------------
 # Health check
@@ -31,22 +31,20 @@ print("✅ YOLO model loaded")
 def home():
     return jsonify({"status": "ok"}), 200
 
-
 # ----------------------------
 # Serve uploaded images (preview)
 # ----------------------------
 @app.route("/uploads/<filename>")
-def get_uploaded_file(filename):
+def serve_uploaded_image(filename):
     return send_from_directory(UPLOAD_DIR, filename)
 
-
 # ----------------------------
-# API: upload + classify
+# Upload + classify endpoint
 # ----------------------------
 @app.route("/api/upload", methods=["POST"])
 def upload_image():
     try:
-        # 1️⃣ Validate inputs
+        # ---- Input validation ----
         image_file = request.files.get("image")
         machine_name = request.form.get("machineName")
 
@@ -56,7 +54,7 @@ def upload_image():
         if not machine_name:
             return jsonify({"success": False, "error": "machineName missing"}), 400
 
-        # 2️⃣ Save image for preview
+        # ---- Save image ----
         ext = os.path.splitext(image_file.filename)[1].lower() or ".jpg"
         filename = f"{uuid.uuid4().hex}{ext}"
         filepath = os.path.join(UPLOAD_DIR, filename)
@@ -64,31 +62,63 @@ def upload_image():
 
         image_url = f"/uploads/{filename}"
 
-        # 3️⃣ Run YOLO classification
-        image = Image.open(filepath).convert("RGB")
+        # ---- Load image safely ----
+        try:
+            image = Image.open(filepath).convert("RGB")
+        except Exception as e:
+            return jsonify({
+                "success": False,
+                "error": "Image decode failed",
+                "details": str(e)
+            }), 400
+
+        # ---- YOLO inference ----
         results = model(image)
 
+        if not results or not results[0].probs:
+            return jsonify({
+                "success": False,
+                "error": "Model returned no probabilities"
+            }), 500
+
         probs = results[0].probs
-        class_id = int(probs.top1)
-        raw_label = results[0].names[class_id]
-        confidence = float(probs.top1conf)
+        names = results[0].names
 
-        # 4️⃣ Map model label → material (TEMP LOGIC)
-        label = raw_label.lower()
+        # ---- FORCE BINARY DECISION: plastic vs metal ----
+        plastic_keywords = [
+            "plastic", "bottle", "bag", "container", "cup", "wrapper", "packet"
+        ]
+        metal_keywords = [
+            "metal", "can", "steel", "iron", "aluminum", "tin", "chain"
+        ]
 
-        if any(k in label for k in ["plastic", "bottle", "bag", "container"]):
+        plastic_score = 0.0
+        metal_score = 0.0
+
+        for idx, score in enumerate(probs.data.tolist()):
+            label = names[idx].lower()
+
+            if any(k in label for k in plastic_keywords):
+                plastic_score += score
+
+            if any(k in label for k in metal_keywords):
+                metal_score += score
+
+        # ---- Final forced classification ----
+        if plastic_score >= metal_score:
             classification = "plastic"
-        elif any(k in label for k in ["metal", "can", "chain", "steel", "iron"]):
+            confidence = plastic_score
+        else:
             classification = "metal"
-     
+            confidence = metal_score
 
-        # 5️⃣ Response matches frontend
+        # ---- Response (frontend contract) ----
         return jsonify({
             "success": True,
             "machineName": machine_name,
             "imageUrl": image_url,
             "classification": classification,
-            "confidence": round(confidence, 4)
+            "confidence": round(float(confidence), 4)
         })
 
     except Exception as e:
@@ -99,9 +129,8 @@ def upload_image():
             "type": type(e).__name__
         }), 500
 
-
 # ----------------------------
-# Entry (Render / local)
+# Entry point (Render / local)
 # ----------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
