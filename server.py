@@ -1,26 +1,28 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from ultralytics import YOLO
 from PIL import Image
 import io
 import os
+import uuid
 import traceback
 
 app = Flask(__name__)
 CORS(app)
 
 # ----------------------------
-# Load YOLO classification model ONCE
+# Config
 # ----------------------------
+UPLOAD_DIR = "uploads"
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
 MODEL_PATH = "yolov8n-cls.pt"
 
-try:
-    model = YOLO(MODEL_PATH)
-    print("✅ YOLO model loaded successfully on CPU")
-except Exception as e:
-    print("❌ YOLO model load failed:", e)
-    raise e
-
+# ----------------------------
+# Load model once
+# ----------------------------
+model = YOLO(MODEL_PATH)
+print("✅ YOLO model loaded")
 
 # ----------------------------
 # Health check
@@ -31,55 +33,76 @@ def home():
 
 
 # ----------------------------
-# Prediction endpoint
+# Serve uploaded images (preview)
 # ----------------------------
-@app.route("/predict", methods=["POST"])
-def predict():
+@app.route("/uploads/<filename>")
+def get_uploaded_file(filename):
+    return send_from_directory(UPLOAD_DIR, filename)
+
+
+# ----------------------------
+# API: upload + classify
+# ----------------------------
+@app.route("/api/upload", methods=["POST"])
+def upload_image():
     try:
-        # Accept multiple possible keys (robust)
-        file = (
-            request.files.get("image")
-            or request.files.get("file")
-            or request.files.get("img")
-        )
+        # 1️⃣ Validate inputs
+        image_file = request.files.get("image")
+        machine_name = request.form.get("machineName")
 
-        if not file:
-            return jsonify({"error": "No image uploaded"}), 400
+        if not image_file:
+            return jsonify({"success": False, "error": "Image missing"}), 400
 
-        # Read image safely
-        image_bytes = file.read()
-        if not image_bytes:
-            return jsonify({"error": "Empty image file"}), 400
+        if not machine_name:
+            return jsonify({"success": False, "error": "machineName missing"}), 400
 
-        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        # 2️⃣ Save image for preview
+        ext = os.path.splitext(image_file.filename)[1].lower() or ".jpg"
+        filename = f"{uuid.uuid4().hex}{ext}"
+        filepath = os.path.join(UPLOAD_DIR, filename)
+        image_file.save(filepath)
 
-        # Run YOLO classification
+        image_url = f"/uploads/{filename}"
+
+        # 3️⃣ Run YOLO classification
+        image = Image.open(filepath).convert("RGB")
         results = model(image)
-
-        if not results or not results[0].probs:
-            return jsonify({"error": "Inference failed"}), 500
 
         probs = results[0].probs
         class_id = int(probs.top1)
-        class_name = results[0].names[class_id]
+        raw_label = results[0].names[class_id]
         confidence = float(probs.top1conf)
 
+        # 4️⃣ Map model label → material (TEMP LOGIC)
+        label = raw_label.lower()
+
+        if any(k in label for k in ["plastic", "bottle", "bag", "container"]):
+            classification = "plastic"
+        elif any(k in label for k in ["metal", "can", "chain", "steel", "iron"]):
+            classification = "metal"
+        else:
+            classification = "unauthorized"
+
+        # 5️⃣ Response matches frontend
         return jsonify({
-            "class": class_name,
+            "success": True,
+            "machineName": machine_name,
+            "imageUrl": image_url,
+            "classification": classification,
             "confidence": round(confidence, 4)
         })
 
     except Exception as e:
-        # IMPORTANT: expose error for debugging
         traceback.print_exc()
         return jsonify({
+            "success": False,
             "error": str(e),
             "type": type(e).__name__
         }), 500
 
 
 # ----------------------------
-# Render / Gunicorn entry
+# Entry (Render / local)
 # ----------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
