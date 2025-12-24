@@ -80,8 +80,7 @@ def upload_image():
             classification = "plastic"
         elif any(k in label for k in ["metal", "can", "chain", "steel", "iron"]):
             classification = "metal"
-        else:
-            classification = "unauthorized"
+     
 
         # 5️⃣ Response matches frontend
         return jsonify({
