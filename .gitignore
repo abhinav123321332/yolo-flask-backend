@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.pyc
+
+# Virtual environments
+yoloenv/
+yoloenvyoloenv/
+
+# Datasets & test files
+dataset/
+test.jpg
+
+# Local folders
+install/
+esp32_gemini_server/
+ultralytics/
+
+# YOLO outputs (ignore everything)
+runs/**
+
+# BUT keep trained model
+!runs/classify/
+!runs/classify/train2/
+!runs/classify/train2/weights/
+!runs/classify/train2/weights/best.pt
+
+# Base model
+yolov8n-cls.pt
+
+# OS
+.DS_Store
+Thumbs.db
