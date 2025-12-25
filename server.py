@@ -2,7 +2,6 @@ from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from ultralytics import YOLO
 from PIL import Image
-import io
 import os
 import uuid
 import traceback
@@ -39,12 +38,12 @@ def serve_uploaded_image(filename):
     return send_from_directory(UPLOAD_DIR, filename)
 
 # ----------------------------
-# Upload + classify endpoint
+# Upload + classify (canteen-focused)
 # ----------------------------
 @app.route("/api/upload", methods=["POST"])
 def upload_image():
     try:
-        # ---- Input validation ----
+        # ---- Validate input ----
         image_file = request.files.get("image")
         machine_name = request.form.get("machineName")
 
@@ -62,7 +61,7 @@ def upload_image():
 
         image_url = f"/uploads/{filename}"
 
-        # ---- Load image safely ----
+        # ---- Load image ----
         try:
             image = Image.open(filepath).convert("RGB")
         except Exception as e:
@@ -84,35 +83,48 @@ def upload_image():
         probs = results[0].probs
         names = results[0].names
 
-        # ---- FORCE BINARY DECISION: plastic vs metal ----
+        # ----------------------------
+        # CANTEEN-OPTIMIZED LOGIC
+        # ----------------------------
         plastic_keywords = [
-            "plastic", "bottle", "bag", "container", "cup", "wrapper", "packet"
+            "bottle", "water_bottle", "beer_bottle", "pop_bottle",
+            "plastic", "container", "cup", "wrapper",
+            "packet", "bag", "sachet", "lid"
         ]
+
         metal_keywords = [
-            "metal", "can", "steel", "iron", "aluminum", "tin", "chain"
+            "can", "tin", "aluminum", "steel",
+            "bottlecap", "cap",
+            "foil", "tray",
+            "spoon", "ladle", "strainer",
+            "screw", "nut", "washer"
         ]
 
         plastic_score = 0.0
         metal_score = 0.0
 
-        for idx, score in enumerate(probs.data.tolist()):
-            label = names[idx].lower()
+        # ✅ Use TOP-5 only (less noise)
+        for idx, score in zip(probs.top5, probs.top5conf):
+            label = names[int(idx)].lower()
 
             if any(k in label for k in plastic_keywords):
-                plastic_score += score
+                plastic_score += score * 1.0
 
             if any(k in label for k in metal_keywords):
-                metal_score += score
+                metal_score += score * 2.5   # 🔥 strong metal bias
 
-        # ---- Final forced classification ----
-        if plastic_score >= metal_score:
-            classification = "plastic"
-            confidence = plastic_score
-        else:
+            # 🔒 HARD RULE: cans & caps are always metal
+            if any(k in label for k in ["can", "bottlecap", "cap"]):
+                metal_score += 1.0
+
+        # ---- Final forced decision ----
+        if metal_score > plastic_score:
             classification = "metal"
             confidence = metal_score
+        else:
+            classification = "plastic"
+            confidence = plastic_score
 
-        # ---- Response (frontend contract) ----
         return jsonify({
             "success": True,
             "machineName": machine_name,
