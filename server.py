@@ -2,178 +2,104 @@ from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from ultralytics import YOLO
 from PIL import Image
-import os
-import uuid
-import traceback
+import os, uuid, traceback
 
 app = Flask(__name__)
 CORS(app)
 
-# =============================
-# Configuration
-# =============================
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-MODEL_PATH = "yolov8n-cls.pt"
+model = YOLO("yolov8n-cls.pt")
+print("✅ YOLO loaded")
 
-# =============================
-# Load YOLO model once
-# =============================
-model = YOLO(MODEL_PATH)
-print("✅ YOLO model loaded successfully")
-
-# =============================
+# --------------------
 # Health check
-# =============================
+# --------------------
 @app.route("/", methods=["GET"])
 def home():
     return jsonify({"status": "ok"}), 200
 
-# =============================
+# --------------------
 # Serve uploaded images
-# =============================
+# --------------------
 @app.route("/uploads/<filename>")
-def serve_uploaded_image(filename):
+def serve_image(filename):
     return send_from_directory(UPLOAD_DIR, filename)
 
-# =============================
-# Upload + classify endpoint
-# =============================
+# --------------------
+# Upload + classify
+# --------------------
 @app.route("/api/upload", methods=["POST"])
-def upload_image():
+def upload():
     try:
-        # -------------------------
-        # Input validation
-        # -------------------------
         image_file = request.files.get("image")
-        machine_name = request.form.get("machineName")
+        machine = request.form.get("machineName")
 
-        if not image_file:
-            return jsonify({"success": False, "error": "Image missing"}), 400
+        if not image_file or not machine:
+            return jsonify({"success": False, "error": "missing data"}), 400
 
-        if not machine_name:
-            return jsonify({"success": False, "error": "machineName missing"}), 400
+        filename = f"{uuid.uuid4().hex}.jpg"
+        path = os.path.join(UPLOAD_DIR, filename)
+        image_file.save(path)
 
-        # -------------------------
-        # Save image
-        # -------------------------
-        ext = os.path.splitext(image_file.filename)[1].lower() or ".jpg"
-        filename = f"{uuid.uuid4().hex}{ext}"
-        filepath = os.path.join(UPLOAD_DIR, filename)
-        image_file.save(filepath)
-
-        image_url = f"/uploads/{filename}"
-
-        # -------------------------
-        # Load image
-        # -------------------------
-        image = Image.open(filepath).convert("RGB")
-
-        # -------------------------
-        # YOLO inference
-        # -------------------------
+        image = Image.open(path).convert("RGB")
         results = model(image)
-
-        if not results or not results[0].probs:
-            return jsonify({"success": False, "error": "Inference failed"}), 500
 
         probs = results[0].probs
         names = results[0].names
 
-        # =====================================================
-        # 🔥 HARD BEVERAGE CAN OVERRIDE (CANTEEN CRITICAL)
-        # =====================================================
-        top5_labels = " ".join(
-            [names[int(i)].lower() for i in probs.top5]
-        )
+        top5 = [names[int(i)].lower() for i in probs.top5]
 
-        beverage_can_keywords = [
-            "can",
-            "beer_bottle",
-            "soda",
-            "cola",
-            "drink",
-            "energy",
-            "redbull",
-            "pepsi",
-            "coca",
-            "mirinda",
-            "fanta",
-            "sprite",
-            "7up"
+        # --------------------
+        # Beverage can override
+        # --------------------
+        can_keywords = [
+            "can", "cola", "soda", "beer", "drink",
+            "coca", "pepsi", "redbull", "mirinda",
+            "fanta", "sprite", "7up"
         ]
 
-        if any(k in top5_labels for k in beverage_can_keywords):
+        if any(k in " ".join(top5) for k in can_keywords):
             return jsonify({
                 "success": True,
-                "machineName": machine_name,
-                "imageUrl": image_url,
+                "machineName": machine,
                 "classification": "metal",
                 "confidence": 0.95,
+                "imageUrl": f"/uploads/{filename}",
                 "note": "beverage can override"
             })
 
-        # =====================================================
-        # CANTEEN-OPTIMIZED PLASTIC vs METAL LOGIC
-        # =====================================================
-        plastic_keywords = [
-            "bottle", "water_bottle", "pill_bottle",
-            "plastic", "container", "cup",
-            "wrapper", "packet", "bag",
-            "sachet", "lid", "lotion"
-        ]
+        # --------------------
+        # Plastic vs metal scoring
+        # --------------------
+        plastic_keys = ["bottle", "plastic", "packet", "wrapper", "cup", "bag"]
+        metal_keys = ["metal", "steel", "aluminum", "foil", "tray", "cap", "ladle", "spoon"]
 
-        metal_keywords = [
-            "can", "tin", "aluminum", "steel",
-            "bottlecap", "cap",
-            "foil", "tray",
-            "spoon", "ladle", "strainer",
-            "oil_filter", "screw", "nut", "washer"
-        ]
+        plastic_score = 0
+        metal_score = 0
 
-        plastic_score = 0.0
-        metal_score = 0.0
+        for i, conf in zip(probs.top5, probs.top5conf):
+            label = names[int(i)].lower()
+            if any(k in label for k in plastic_keys):
+                plastic_score += conf
+            if any(k in label for k in metal_keys):
+                metal_score += conf * 2.0
 
-        # Use TOP-5 only (reduces ImageNet noise)
-        for idx, score in zip(probs.top5, probs.top5conf):
-            label = names[int(idx)].lower()
-
-            if any(k in label for k in plastic_keywords):
-                plastic_score += score * 1.0
-
-            if any(k in label for k in metal_keywords):
-                metal_score += score * 2.5  # strong metal bias
-
-        # -------------------------
-        # Final forced decision
-        # -------------------------
-        if metal_score > plastic_score:
-            classification = "metal"
-            confidence = metal_score
-        else:
-            classification = "plastic"
-            confidence = plastic_score
+        classification = "metal" if metal_score > plastic_score else "plastic"
 
         return jsonify({
             "success": True,
-            "machineName": machine_name,
-            "imageUrl": image_url,
+            "machineName": machine,
             "classification": classification,
-            "confidence": round(float(confidence), 4)
+            "confidence": round(float(max(plastic_score, metal_score)), 4),
+            "imageUrl": f"/uploads/{filename}"
         })
 
     except Exception as e:
         traceback.print_exc()
-        return jsonify({
-            "success": False,
-            "error": str(e),
-            "type": type(e).__name__
-        }), 500
+        return jsonify({"success": False, "error": str(e)}), 500
 
-# =============================
-# Entry point
-# =============================
+
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
