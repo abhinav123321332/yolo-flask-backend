@@ -9,41 +9,43 @@ import traceback
 app = Flask(__name__)
 CORS(app)
 
-# ----------------------------
+# =============================
 # Configuration
-# ----------------------------
+# =============================
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 MODEL_PATH = "yolov8n-cls.pt"
 
-# ----------------------------
+# =============================
 # Load YOLO model once
-# ----------------------------
+# =============================
 model = YOLO(MODEL_PATH)
 print("✅ YOLO model loaded successfully")
 
-# ----------------------------
+# =============================
 # Health check
-# ----------------------------
+# =============================
 @app.route("/", methods=["GET"])
 def home():
     return jsonify({"status": "ok"}), 200
 
-# ----------------------------
-# Serve uploaded images (preview)
-# ----------------------------
+# =============================
+# Serve uploaded images
+# =============================
 @app.route("/uploads/<filename>")
 def serve_uploaded_image(filename):
     return send_from_directory(UPLOAD_DIR, filename)
 
-# ----------------------------
-# Upload + classify (canteen-focused)
-# ----------------------------
+# =============================
+# Upload + classify endpoint
+# =============================
 @app.route("/api/upload", methods=["POST"])
 def upload_image():
     try:
-        # ---- Validate input ----
+        # -------------------------
+        # Input validation
+        # -------------------------
         image_file = request.files.get("image")
         machine_name = request.form.get("machineName")
 
@@ -53,7 +55,9 @@ def upload_image():
         if not machine_name:
             return jsonify({"success": False, "error": "machineName missing"}), 400
 
-        # ---- Save image ----
+        # -------------------------
+        # Save image
+        # -------------------------
         ext = os.path.splitext(image_file.filename)[1].lower() or ".jpg"
         filename = f"{uuid.uuid4().hex}{ext}"
         filepath = os.path.join(UPLOAD_DIR, filename)
@@ -61,35 +65,63 @@ def upload_image():
 
         image_url = f"/uploads/{filename}"
 
-        # ---- Load image ----
-        try:
-            image = Image.open(filepath).convert("RGB")
-        except Exception as e:
-            return jsonify({
-                "success": False,
-                "error": "Image decode failed",
-                "details": str(e)
-            }), 400
+        # -------------------------
+        # Load image
+        # -------------------------
+        image = Image.open(filepath).convert("RGB")
 
-        # ---- YOLO inference ----
+        # -------------------------
+        # YOLO inference
+        # -------------------------
         results = model(image)
 
         if not results or not results[0].probs:
-            return jsonify({
-                "success": False,
-                "error": "Model returned no probabilities"
-            }), 500
+            return jsonify({"success": False, "error": "Inference failed"}), 500
 
         probs = results[0].probs
         names = results[0].names
 
-        # ----------------------------
-        # CANTEEN-OPTIMIZED LOGIC
-        # ----------------------------
+        # =====================================================
+        # 🔥 HARD BEVERAGE CAN OVERRIDE (CANTEEN CRITICAL)
+        # =====================================================
+        top5_labels = " ".join(
+            [names[int(i)].lower() for i in probs.top5]
+        )
+
+        beverage_can_keywords = [
+            "can",
+            "beer_bottle",
+            "soda",
+            "cola",
+            "drink",
+            "energy",
+            "redbull",
+            "pepsi",
+            "coca",
+            "mirinda",
+            "fanta",
+            "sprite",
+            "7up"
+        ]
+
+        if any(k in top5_labels for k in beverage_can_keywords):
+            return jsonify({
+                "success": True,
+                "machineName": machine_name,
+                "imageUrl": image_url,
+                "classification": "metal",
+                "confidence": 0.95,
+                "note": "beverage can override"
+            })
+
+        # =====================================================
+        # CANTEEN-OPTIMIZED PLASTIC vs METAL LOGIC
+        # =====================================================
         plastic_keywords = [
-            "bottle", "water_bottle", "beer_bottle", "pop_bottle",
-            "plastic", "container", "cup", "wrapper",
-            "packet", "bag", "sachet", "lid"
+            "bottle", "water_bottle", "pill_bottle",
+            "plastic", "container", "cup",
+            "wrapper", "packet", "bag",
+            "sachet", "lid", "lotion"
         ]
 
         metal_keywords = [
@@ -97,13 +129,13 @@ def upload_image():
             "bottlecap", "cap",
             "foil", "tray",
             "spoon", "ladle", "strainer",
-            "screw", "nut", "washer"
+            "oil_filter", "screw", "nut", "washer"
         ]
 
         plastic_score = 0.0
         metal_score = 0.0
 
-        # ✅ Use TOP-5 only (less noise)
+        # Use TOP-5 only (reduces ImageNet noise)
         for idx, score in zip(probs.top5, probs.top5conf):
             label = names[int(idx)].lower()
 
@@ -111,13 +143,11 @@ def upload_image():
                 plastic_score += score * 1.0
 
             if any(k in label for k in metal_keywords):
-                metal_score += score * 2.5   # 🔥 strong metal bias
+                metal_score += score * 2.5  # strong metal bias
 
-            # 🔒 HARD RULE: cans & caps are always metal
-            if any(k in label for k in ["can", "bottlecap", "cap"]):
-                metal_score += 1.0
-
-        # ---- Final forced decision ----
+        # -------------------------
+        # Final forced decision
+        # -------------------------
         if metal_score > plastic_score:
             classification = "metal"
             confidence = metal_score
@@ -141,9 +171,9 @@ def upload_image():
             "type": type(e).__name__
         }), 500
 
-# ----------------------------
-# Entry point (Render / local)
-# ----------------------------
+# =============================
+# Entry point
+# =============================
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
